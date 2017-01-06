@@ -7,4 +7,5 @@ authors = ["Michael Panciera <michael.panciera.work@gmail.com>"]
 
 [dependencies]
 rayon = "0.6.0"
-bio = "0.10.0"
+bio = "0.10.0" 
+lzw = { git = "https://github.com/nwin/lzw" }

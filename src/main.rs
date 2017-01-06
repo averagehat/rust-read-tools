@@ -1,5 +1,7 @@
 extern crate rayon;
 extern crate bio;
+extern crate lzw;
+
 
 use std::sync::{Arc, Mutex};
 use std::io::prelude::*;
@@ -11,6 +13,8 @@ use rayon::par_iter::zip::ZipIter;
 use bio::io::fastq;
 
 use bio::io::fastq::Record;
+
+const LZW_MIN: f32 = 0.55;
 
 fn is_odd(x: &String) -> bool {
   match x.parse::<i32>() {
@@ -27,6 +31,22 @@ fn main() {
    println!("done!");
 
 }
+const SIZE: u8 = 8;
+//fn lzw_score(buf: &[u8]) -> f32 {
+fn lzw_score(read: &Record) -> f32 {
+    let buf = read.seq();
+    let mut compressed = vec![]; 
+{ // scope needed for lifetime (compressed's consumption)
+    let mut enc = lzw::Encoder::new(lzw::LsbWriter::new(&mut compressed), SIZE).unwrap();
+    enc.encode_bytes(buf).unwrap();
+}
+    let score = (compressed.len() as f32) / (buf.len() as f32);
+    
+//    println!(", uncomp: {:?}", std::str::from_utf8(buf));
+//    println!("compressed: {:?}, uncomp: {:?}", compressed, buf);
+    println!("{}", score);
+    score
+}
 
 fn run() -> Result<(), io::Error> {
     let r1 = "t1.fastq"; 
@@ -39,7 +59,7 @@ fn run() -> Result<(), io::Error> {
     let mut out_fwd = Arc::new(Mutex::new(fastq::Writer::new(try!(File::create(&out1)))));
     let mut out_rev = Arc::new(Mutex::new(fastq::Writer::new(try!(File::create(&out2)))));
 
-    let chunk_size = 1;
+    let chunk_size = 10_000;
     let mut recs1_ = in1.records();
     let mut recs2_ = in2.records();
 
@@ -53,14 +73,16 @@ fn run() -> Result<(), io::Error> {
           .filter(|pair| {
                 let fwd = pair.0.as_ref();
                 let rev = pair.1.as_ref();
-              !(has_n(fwd.unwrap()) || has_n(rev.unwrap()))
+              !(has_n(fwd.unwrap()) || has_n(rev.unwrap())) 
+           &&  (lzw_score(fwd.unwrap()) > LZW_MIN &&
+                lzw_score(rev.unwrap()) > LZW_MIN)
           })
           .for_each(|pair| {
               out_fwd.lock().unwrap().write_record(&pair.0.unwrap());
               out_rev.lock().unwrap().write_record(&pair.1.unwrap());
           });
 
-        if (size_left < chunk_size) { break; }
+        if size_left < chunk_size { break; }
     }
 
     try!(out_fwd.lock().unwrap().flush());

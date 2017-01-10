@@ -1,94 +1,88 @@
-extern crate rayon;
+
+extern crate docopt;
 extern crate bio;
-extern crate lzw;
+extern crate rustc_serialize;
 
-
-use std::sync::{Arc, Mutex};
-use std::io::prelude::*;
 use std::io;
 use std::fs::File;
 use std::path::Path;
-use rayon::prelude::*;
-use rayon::par_iter::zip::ZipIter;
-use bio::io::fastq;
+use bio::io::fasta;
 
-use bio::io::fastq::Record;
 
-const LZW_MIN: f32 = 0.55;
+use docopt::Docopt;
 
-fn is_odd(x: &String) -> bool {
-  match x.parse::<i32>() {
-    Ok(x) => (x % 2 != 0),
-    Err(_) => { println!("bleh!"); false }
-    }
-  }
+ // readtools <fasta> [--gene=<gene>] [--maxns=<maxns>]
+//struct Args { //   maxNs: i8, //   gene:   String, //   input: Path //}
+//docopt!(Args derive Debug, "
+const USAGE: &'static str =  "
+readtools.
 
-fn has_n(read: &Record) -> bool {
-    read.seq().contains(&b'N')
+Usage:
+  readtools dropns  <fasta> <maxns>
+  readtools dropgene <fasta> <gene> 
+
+Options:
+  -h --help     Show this screen.
+  --version     Show version.
+  --maxns=<maxns>  Maximum number of Ns.
+  --gene=<gene>      gene to separate out.
+  --drifting    Drifting mine.
+";
+#[derive(Debug, RustcDecodable)]
+struct Args {
+  cmd_dropns: bool,
+  cmd_dropgene: bool,
+  arg_fasta: String,
+  arg_maxns: usize,
+  arg_gene:   String
+}
+
+#[derive(Debug)]
+enum RunType {
+  Ns,
+  Gene
 }
 fn main() {
-   run();
-   println!("done!");
-
+ run();
 }
-const SIZE: u8 = 8;
-//fn lzw_score(buf: &[u8]) -> f32 {
-fn lzw_score(read: &Record) -> f32 {
-    let buf = read.seq();
-    let mut compressed = vec![]; 
-{ // scope needed for lifetime (compressed's consumption)
-    let mut enc = lzw::Encoder::new(lzw::LsbWriter::new(&mut compressed), SIZE).unwrap();
-    enc.encode_bytes(buf).unwrap();
-}
-    let score = (compressed.len() as f32) / (buf.len() as f32);
-    
-//    println!(", uncomp: {:?}", std::str::from_utf8(buf));
-//    println!("compressed: {:?}, uncomp: {:?}", compressed, buf);
-    println!("{}", score);
-    score
-}
-
 fn run() -> Result<(), io::Error> {
-    let r1 = "t1.fastq"; 
-    let r2 = "t2.fastq";
-    let in1 = fastq::Reader::new(try!(File::open(r1)));
-    let in2 = fastq::Reader::new(try!(File::open(r2)));
-
-    let out1 = Path::new("out1.fastq");
-    let out2 = Path::new("out2.fastq");
-    let mut out_fwd = Arc::new(Mutex::new(fastq::Writer::new(try!(File::create(&out1)))));
-    let mut out_rev = Arc::new(Mutex::new(fastq::Writer::new(try!(File::create(&out2)))));
-
-    let chunk_size = 10_000;
-    let mut recs1_ = in1.records();
-    let mut recs2_ = in2.records();
-
-    loop {
-        let recs1: Vec<_> = recs1_.by_ref().take(chunk_size).collect();
-        let recs2: Vec<_> = recs2_.by_ref().take(chunk_size).collect();
-
-        let size_left = recs1.len();
-
-        recs1.into_par_iter().zip(recs2)
-          .filter(|pair| {
-                let fwd = pair.0.as_ref();
-                let rev = pair.1.as_ref();
-              !(has_n(fwd.unwrap()) || has_n(rev.unwrap())) 
-           &&  (lzw_score(fwd.unwrap()) > LZW_MIN &&
-                lzw_score(rev.unwrap()) > LZW_MIN)
-          })
-          .for_each(|pair| {
-              out_fwd.lock().unwrap().write_record(&pair.0.unwrap());
-              out_rev.lock().unwrap().write_record(&pair.1.unwrap());
-          });
-
-        if size_left < chunk_size { break; }
-    }
-
-    try!(out_fwd.lock().unwrap().flush());
-    try!(out_rev.lock().unwrap().flush());
+    //let args: Args = Args::docopt().decode().unwrap_or_else(|e| e.exit()); 
+    let args: Args = Docopt::new(USAGE)
+                            .and_then(|d| d.decode())
+                            .unwrap_or_else(|e| e.exit());
+    let input = Path::new(&args.arg_fasta);
+    let fasta_in = fasta::Reader::new(try!(File::open(&input)));
+    let recs = fasta_in.records();
+    
+    let runtype = if args.cmd_dropns { RunType::Ns } else { RunType::Gene };
+    let (no_reads, with_reads): (Vec<_>, Vec<_>) = match &runtype {
+      &RunType::Ns =>   recs.partition(|&ref r_| {
+          let r = r_.as_ref();
+          r.unwrap().seq().iter().filter(|&x| (x == &b'n' || x == &b'N')).count() <= args.arg_maxns
+                                       }),
+      &RunType::Gene => {
+          let pattern = format!("|{}|", &args.arg_gene);
+          recs.partition(|&ref r_| {
+              let r = r_.as_ref();
+              !r.unwrap().id().unwrap().contains(&pattern) }) 
+      }
+  };
+    let prefix =  input.file_stem().unwrap().to_str().unwrap();
+    let np = format!("{:}-no-{:?}.fas", prefix, runtype);
+    let wp = format!("{:}-with-{:?}.fas", prefix, runtype);
+    let no_path = Path::new(&np);
+    let with_path = Path::new(&wp);
+    let mut no_writer =   fasta::Writer::new(try!(File::create(&no_path)));
+    let mut with_writer = fasta::Writer::new(try!(File::create(&with_path)));
+    for r in no_reads {
+      try!(no_writer.write_record(&r.unwrap()));
+}
+    for r in with_reads {
+      try!(with_writer.write_record(&r.unwrap()));
+} 
+    try!(no_writer.flush());
+    try!(with_writer.flush());
     Ok(())
-
 
 }
 
